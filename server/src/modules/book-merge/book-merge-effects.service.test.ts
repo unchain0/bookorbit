@@ -235,6 +235,30 @@ describe('BookMergeEffectsService.apply', () => {
   });
 
   describe('identical copies', () => {
+    it('does not unlink or rescan files retired by a logical merge', async () => {
+      const { effects, repository, consolidation, scanner } = createEffects();
+      const plan = planOf({
+        logicalMerge: true,
+        logicalFileTombstones: [
+          {
+            sourceBookId: 2,
+            fileId: 20,
+            survivorFileId: 10,
+            libraryFolderId: 11,
+            absolutePath: join(libraryRoot, 'Dune Copy', 'Dune.epub'),
+            survivorPath: join(bookFolder, 'Dune.epub'),
+            sha256: 'a'.repeat(64),
+          },
+        ],
+      });
+
+      await expect(effects.apply(inputOf(plan))).resolves.toBe(1);
+
+      expect(scanner.scanBookDirectoryAsync).not.toHaveBeenCalled();
+      expect(consolidation.retireFile).not.toHaveBeenCalled();
+      expect(repository.findFilePath).not.toHaveBeenCalled();
+    });
+
     async function pairOnDisk(filePaths: Map<number, string>, copyBytes: string, survivorBytes: string) {
       const copy = join(bookFolder, 'Dune (2).epub');
       const survivor = join(bookFolder, 'Dune.epub');

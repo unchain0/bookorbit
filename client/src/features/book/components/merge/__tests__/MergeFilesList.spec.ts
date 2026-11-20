@@ -27,17 +27,19 @@ describe('MergeFilesList', () => {
     activateI18nLocale('en')
     const t = i18n.global.t
 
-    const [kept, sidecar, hidden, missing] = placements([
+    const [kept, sidecar, hidden, missing, logicalCopy] = placements([
       mergeFile(10, 1, { action: 'stay', reason: 'already_in_destination', toRelPath: 'Ann Author/Book 1/book-10.epub' }),
       mergeFile(20, 2, { action: 'stay', reason: 'metadata_kept_in_place' }),
       mergeFile(21, 2, { action: 'hide', reason: 'metadata_hidden' }),
       mergeFile(22, 2, { action: 'stay', reason: 'missing' }),
+      mergeFile(23, 2, { action: 'stay', reason: 'read_only_duplicate' }),
     ])
 
     expect(kept).toBe(t('book.merge.files.inPlace'))
     expect(sidecar).toBe(t('book.merge.files.stays'))
     expect(hidden).toBe(t('book.merge.files.hidden'))
     expect(missing).toBe(t('book.merge.files.missing'))
+    expect(logicalCopy).toBe(t('book.merge.files.readOnlyDuplicate'))
   })
 })
 

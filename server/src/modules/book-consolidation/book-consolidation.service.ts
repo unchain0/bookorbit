@@ -55,6 +55,14 @@ export interface ConsolidateInput {
   jobId?: number | null;
   /** False for paths that merge a stray duplicate row rather than a book a client may have stored. */
   recordAlias?: boolean;
+  /** Duplicate content rows to retire and ignore while their unchanged bytes remain on disk. */
+  logicalFileTombstones?: Array<{
+    loserFileId: number;
+    survivorFileId: number;
+    libraryFolderId: number;
+    absolutePath: string;
+    sha256: string;
+  }>;
 }
 
 export interface AbsorbDuplicateInput {
@@ -93,6 +101,9 @@ export class BookConsolidationService {
   async consolidate(tx: ConsolidationTx, input: ConsolidateInput): Promise<ConsolidateResult> {
     const { targetBookId: k, sourceBookId: s } = input;
     if (k === s) throw new ConflictException('A book cannot be merged into itself.');
+    if (input.logicalFileTombstones?.length && input.recordAlias === false) {
+      throw new ConflictException('Logical duplicate files require a merge alias.');
+    }
 
     const locked = await this.repository.lockBooks(tx, [k, s]);
     const target = locked.find((row) => row.id === k);
@@ -119,6 +130,9 @@ export class BookConsolidationService {
     await this.repository.updateFileRows(tx, k, destination.libraryFolderId, input.targetFileUpdates ?? []);
     await this.repository.updateFileRows(tx, k, destination.libraryFolderId, input.sourceFileUpdates ?? []);
     await this.repository.reparentRemainingFiles(tx, s, k, destination.libraryFolderId);
+    for (const tombstone of input.logicalFileTombstones ?? []) {
+      await this.retireFile(tx, { bookId: k, loserFileId: tombstone.loserFileId, survivorFileId: tombstone.survivorFileId });
+    }
 
     // Book-level data.
     const fieldSources = input.fieldSources ?? resolveFieldSources([targetFacts, sourceFacts]);
@@ -161,6 +175,7 @@ export class BookConsolidationService {
         jobId: input.jobId ?? null,
         snapshot,
       });
+      await this.repository.recordFileTombstones(tx, s, input.logicalFileTombstones ?? []);
     }
 
     await this.repository.deleteBook(tx, s);

@@ -92,6 +92,25 @@ export interface MergeStep {
   roots: string[];
 }
 
+export interface IdenticalFilePair {
+  loserFileId: number;
+  survivorFileId: number;
+  loserBookId?: number;
+  survivorBookId?: number;
+  absolutePath?: string;
+  sha256?: string;
+}
+
+export interface LogicalFileTombstone {
+  sourceBookId: number;
+  fileId: number;
+  survivorFileId: number;
+  libraryFolderId: number;
+  absolutePath: string;
+  survivorPath: string;
+  sha256: string;
+}
+
 export interface MergeExecutionPlan {
   /** The library the merged book lives in afterwards. */
   libraryId: number;
@@ -108,7 +127,9 @@ export interface MergeExecutionPlan {
   excludeTagIds: number[];
   excludeGenreIds: number[];
   hiddenRequestIds: number[];
-  identicalPairs: Array<{ loserFileId: number; survivorFileId: number }>;
+  identicalPairs: IdenticalFilePair[];
+  logicalMerge?: boolean;
+  logicalFileTombstones?: LogicalFileTombstone[];
   deleteIdenticalCopies: boolean;
   watched: boolean;
 }
@@ -200,6 +221,7 @@ export class BookMergePlanner {
   ) {}
 
   async plan(request: PlanRequest, user: RequestUser, options: PlanOptions = {}): Promise<PlanResult> {
+    this.hashCache.clear();
     const sourceIds = request.sourceBookIds;
     const allIds = [request.targetBookId, ...sourceIds];
     const blockers: BookMergeBlocker[] = [];
@@ -325,9 +347,45 @@ export class BookMergePlanner {
     }
 
     // Files.
-    const filePlan = destination
-      ? await this.planFiles(target, sources, destination, libraryId, libraries, blockers, warnings)
-      : { entries: [], steps: [], identicalPairs: [] as Array<{ loserFileId: number; survivorFileId: number }> };
+    const originalDestination = destination;
+    const canProbeLogicalMerge =
+      involvedLibraryIds.length === 1 && (request.destinationBookId === undefined || request.destinationBookId === target.id);
+    const filePlanDestination = destination ?? (canProbeLogicalMerge ? target : null);
+    const filePlanBlockers = destination ? blockers : [];
+    const filePlanWarnings = warnings;
+    let filePlan = filePlanDestination
+      ? await this.planFiles(target, sources, filePlanDestination, libraryId, libraries, filePlanBlockers, filePlanWarnings)
+      : { entries: [], steps: [], identicalPairs: [] as IdenticalFilePair[], readOnlyFilesystem: false };
+    const proposedTombstones = this.logicalReadOnlyMergeFiles(target, sources, request, filePlan);
+    const hasUntrackedSourceFiles = filePlanWarnings.some((warning) => warning.code === 'LEFTOVER_FILES');
+    const logicalFileTombstones = hasUntrackedSourceFiles ? null : proposedTombstones;
+    const logicalMerge = logicalFileTombstones !== null;
+
+    if (logicalMerge) {
+      destination = target;
+      newFolderPath = null;
+      const fileBlockers = new Set([
+        'FILE_PER_BOOK_LIBRARY',
+        'NO_DESTINATION_FOLDER',
+        'FOLDER_NOT_WRITABLE',
+        'PATH_CONFLICT',
+        'NESTED_BOOK_CONFLICT',
+        'INSUFFICIENT_SPACE',
+        'FORMAT_NOT_ALLOWED',
+        'PATH_EXCLUDED',
+      ]);
+      for (let index = blockers.length - 1; index >= 0; index--) {
+        if (fileBlockers.has(blockers[index]!.code)) blockers.splice(index, 1);
+      }
+      const fileWarnings = new Set(['CROSS_DEVICE_COPY', 'IDENTICAL_COPIES', 'RENAMED_ON_COLLISION', 'LEFTOVER_FILES', 'DESTINATION_MOVES_TARGET']);
+      for (let index = warnings.length - 1; index >= 0; index--) {
+        if (fileWarnings.has(warnings[index]!.code)) warnings.splice(index, 1);
+      }
+      this.convertToLogicalMerge(filePlan, target, sources, logicalFileTombstones);
+      warnings.push({ code: 'READ_ONLY_DUPLICATES_RETAINED', count: logicalFileTombstones.length });
+    } else if (!originalDestination) {
+      filePlan = { entries: [], steps: [], identicalPairs: [], readOnlyFilesystem: false };
+    }
 
     // Readers, visibility, services.
     const userData = await this.userData(
@@ -363,7 +421,12 @@ export class BookMergePlanner {
     const uniqueBlockers = this.dedupeBlockers(blockers);
     const eligible = uniqueBlockers.length === 0;
     const previewToken = eligible
-      ? await this.previewToken(books, destination?.id ?? null, libraryId, loss, { warnings, librarySettingChanges })
+      ? await this.previewToken(books, destination?.id ?? null, libraryId, loss, {
+          warnings,
+          librarySettingChanges,
+          logicalMerge,
+          logicalFileTombstones: logicalFileTombstones ?? [],
+        })
       : null;
     const canDelete = user.isSuperuser || user.permissions.includes(Permission.LibraryDeleteBooks);
 
@@ -378,6 +441,7 @@ export class BookMergePlanner {
       newFolderRelPath: newFolderPath ? relative(target.libraryFolderPath, newFolderPath) : null,
       fields,
       files: filePlan.entries,
+      logicalMerge,
       userData,
       visibility: {
         tags: visibility.tags,
@@ -386,7 +450,7 @@ export class BookMergePlanner {
         resultTags: visibility.resultTags,
         resultGenres: visibility.resultGenres,
       },
-      canRemoveIdenticalCopies: canDelete && filePlan.identicalPairs.length > 0,
+      canRemoveIdenticalCopies: !logicalMerge && canDelete && filePlan.identicalPairs.length > 0,
       destinationLibraryId: destination ? libraryId : null,
       destinationAccessLoss,
       librarySettingChanges,
@@ -413,10 +477,103 @@ export class BookMergePlanner {
         excludeGenreIds: visibility.excludeGenreIds,
         hiddenRequestIds: [...new Set([...visibility.hiddenRequestIds, ...loss.hiddenRequestIds])].sort((a, b) => a - b),
         identicalPairs: filePlan.identicalPairs,
-        deleteIdenticalCopies: request.deleteIdenticalCopies === true && canDelete,
+        logicalMerge,
+        logicalFileTombstones: logicalFileTombstones ?? undefined,
+        deleteIdenticalCopies: !logicalMerge && request.deleteIdenticalCopies === true && canDelete,
         watched: involvedLibraryIds.some((id) => libraries.get(id)?.watch === true),
       },
     };
+  }
+
+  private logicalReadOnlyMergeFiles(
+    target: BookContext,
+    sources: BookContext[],
+    request: PlanRequest,
+    filePlan: { identicalPairs: IdenticalFilePair[]; readOnlyFilesystem: boolean },
+  ): LogicalFileTombstone[] | null {
+    if (
+      !filePlan.readOnlyFilesystem ||
+      [target, ...sources].some(isFilePerBook) ||
+      (request.destinationBookId !== undefined && request.destinationBookId !== target.id) ||
+      sources.some((source) => source.libraryId !== target.libraryId)
+    )
+      return null;
+    const pairByLoser = new Map(filePlan.identicalPairs.map((pair) => [pair.loserFileId, pair]));
+    const tombstones: LogicalFileTombstone[] = [];
+    for (const source of sources) {
+      const sourceTombstones = this.logicalTombstonesForSource(source, target, pairByLoser);
+      if (!sourceTombstones) return null;
+      tombstones.push(...sourceTombstones);
+    }
+    return tombstones.length > 0 ? tombstones : null;
+  }
+
+  private logicalTombstonesForSource(
+    source: BookContext,
+    target: BookContext,
+    pairByLoser: Map<number, IdenticalFilePair>,
+  ): LogicalFileTombstone[] | null {
+    const contentFiles = source.files.filter((file) => file.role === 'content');
+    if (contentFiles.length === 0 || source.files.some((file) => !['content', 'cover', 'metadata'].includes(file.role))) return null;
+    const tombstones = contentFiles.map((file) => {
+      const pair = pairByLoser.get(file.id);
+      const survivor = target.files.find((candidate) => candidate.id === pair?.survivorFileId);
+      if (!pair?.sha256 || pair.loserBookId !== source.id || pair.survivorBookId !== target.id || !pair.absolutePath || !survivor) return null;
+      return {
+        sourceBookId: source.id,
+        fileId: file.id,
+        survivorFileId: pair.survivorFileId,
+        libraryFolderId: source.libraryFolderId,
+        absolutePath: pair.absolutePath,
+        survivorPath: survivor.absolutePath,
+        sha256: pair.sha256,
+      };
+    });
+    return tombstones.some((tombstone) => tombstone === null) ? null : (tombstones as LogicalFileTombstone[]);
+  }
+
+  private convertToLogicalMerge(
+    filePlan: { entries: BookMergeFilePlanEntry[]; steps: MergeStep[] },
+    target: BookContext,
+    sources: BookContext[],
+    tombstones: LogicalFileTombstone[],
+  ): void {
+    const tombstonedIds = new Set(tombstones.map((tombstone) => tombstone.fileId));
+    const sidecarIds = new Map(
+      sources.map((source) => [source.id, source.files.filter((file) => file.role === 'cover' || file.role === 'metadata').map((file) => file.id)]),
+    );
+    for (const entry of filePlan.entries) {
+      if (entry.bookId === target.id) {
+        entry.action = 'stay';
+        entry.reason = 'already_in_destination';
+        entry.toRelPath = entry.fromRelPath;
+        entry.toLibraryId = entry.fromLibraryId ?? target.libraryId;
+        entry.renamed = false;
+        entry.crossDevice = false;
+      } else if (tombstonedIds.has(entry.fileId)) {
+        entry.action = 'stay';
+        entry.reason = 'read_only_duplicate';
+        entry.toRelPath = entry.fromRelPath;
+        entry.renamed = false;
+        entry.crossDevice = false;
+        entry.toLibraryId = entry.fromLibraryId ?? target.libraryId;
+      } else if (entry.role === 'cover' || entry.role === 'metadata') {
+        entry.action = 'stay';
+        entry.reason = entry.role === 'cover' ? 'cover_kept_in_place' : 'metadata_kept_in_place';
+        entry.toRelPath = entry.fromRelPath;
+        entry.renamed = false;
+        entry.crossDevice = false;
+        entry.toLibraryId = entry.fromLibraryId ?? target.libraryId;
+      }
+    }
+    filePlan.steps = sources.map((source) => ({
+      sourceBookId: source.id,
+      moves: [],
+      targetFileIds: [],
+      droppedSidecarFileIds: sidecarIds.get(source.id) ?? [],
+      vacatedFolders: [],
+      roots: [target.libraryFolderPath, source.libraryFolderPath],
+    }));
   }
 
   /**
@@ -776,10 +933,13 @@ export class BookMergePlanner {
         if (owner && !folders.has(folder)) folders.set(folder, { root: owner.libraryFolderPath, libraryId: owner.libraryId });
       }
     }
+    let readOnlyFilesystem = folders.size > 0;
     for (const [folder, { root, libraryId: folderLibraryId }] of folders) {
       try {
         await access(folder, fsConstants.W_OK);
-      } catch {
+        readOnlyFilesystem = false;
+      } catch (error) {
+        if (!(typeof error === 'object' && error !== null && 'code' in error && error.code === 'EROFS')) readOnlyFilesystem = false;
         blockers.push({ code: 'FOLDER_NOT_WRITABLE', libraryId: folderLibraryId, relPath: relative(root, folder) || '.' });
       }
     }
@@ -816,7 +976,7 @@ export class BookMergePlanner {
           : sources.findIndex((s) => s.id === a.sourceBookId) - sources.findIndex((s) => s.id === b.sourceBookId),
     );
     for (const source of sources) if (!steps.has(source.id)) orderedSteps.push(stepFor(source.id));
-    return { entries, steps: orderedSteps, identicalPairs };
+    return { entries, steps: orderedSteps, identicalPairs, readOnlyFilesystem };
   }
 
   /** A file entering another library must be one that library's scanner keeps: an allowed format, a path it does not exclude. */
@@ -925,7 +1085,7 @@ export class BookMergePlanner {
     books: BookContext[],
     onDisk: Map<number, { size: number } | null>,
     entries: BookMergeFilePlanEntry[],
-  ): Promise<Array<{ loserFileId: number; survivorFileId: number }>> {
+  ): Promise<IdenticalFilePair[]> {
     const contentFiles = books.flatMap((book) => book.files.filter((file) => file.role === 'content' && file.fileHash && onDisk.get(file.id)));
     const groups = new Map<string, MergeFileRow[]>();
     for (const file of contentFiles) {
@@ -933,7 +1093,7 @@ export class BookMergePlanner {
       groups.set(key, [...(groups.get(key) ?? []), file]);
     }
     const candidates = [...groups.values()].filter((group) => new Set(group.map((file) => file.bookId)).size > 1);
-    const pairs: Array<{ loserFileId: number; survivorFileId: number }> = [];
+    const pairs: IdenticalFilePair[] = [];
     const queue = candidates.flat();
     const hashes = new Map<number, string>();
     await Promise.all(
@@ -953,7 +1113,14 @@ export class BookMergePlanner {
         const [survivor, ...losers] = [...same].sort((a, b) => order.get(a.bookId)! - order.get(b.bookId)! || a.id - b.id);
         for (const loser of losers) {
           if (loser.bookId === survivor.bookId) continue;
-          pairs.push({ loserFileId: loser.id, survivorFileId: survivor.id });
+          pairs.push({
+            loserFileId: loser.id,
+            survivorFileId: survivor.id,
+            loserBookId: loser.bookId,
+            survivorBookId: survivor.bookId,
+            absolutePath: loser.absolutePath,
+            sha256: hashes.get(loser.id)!,
+          });
           const entry = entries.find((candidate) => candidate.fileId === loser.id);
           if (entry) entry.identical = true;
         }
@@ -1188,7 +1355,12 @@ export class BookMergePlanner {
     destinationBookId: number | null,
     destinationLibraryId: number,
     loss: AccessLoss,
-    notices: { warnings: BookMergeWarning[]; librarySettingChanges: BookMergeLibrarySettingChange[] },
+    notices: {
+      warnings: BookMergeWarning[];
+      librarySettingChanges: BookMergeLibrarySettingChange[];
+      logicalMerge: boolean;
+      logicalFileTombstones: LogicalFileTombstone[];
+    },
   ): Promise<string> {
     const { tags, genres } = await this.repository.loadTagsAndGenres(books.map((book) => book.id));
     const payload = {
@@ -1200,6 +1372,8 @@ export class BookMergePlanner {
       // (a Kobo count, the primary format, hidden custom fields) still makes the preview stale.
       warnings: notices.warnings.map((warning) => stableJson(warning)).sort(),
       librarySettingChanges: notices.librarySettingChanges.map((change) => stableJson(change)).sort(),
+      logicalMerge: notices.logicalMerge,
+      logicalFileTombstones: notices.logicalFileTombstones.map((tombstone) => stableJson(tombstone)).sort(),
       books: [...books]
         .sort((a, b) => a.id - b.id)
         .map((book) => ({

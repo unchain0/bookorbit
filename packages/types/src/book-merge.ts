@@ -59,6 +59,8 @@ export const BOOK_MERGE_WARNINGS = [
   "CUSTOM_FIELDS_HIDDEN",
   /** Files with other hard links (a torrent client's copy) are copied to another drive; the other links keep theirs. */
   "HARDLINKED_FILES",
+  /** Identical source files stay on a read-only library and are ignored by the scanner. */
+  "READ_ONLY_DUPLICATES_RETAINED",
   /** The kept book moves to the destination library (`libraryId`). */
   "TARGET_CHANGES_LIBRARY",
   /** An open request for the book's other format joins only in its own library (`libraryId`): it arrives there as a book of its own. */
@@ -191,7 +193,15 @@ export interface BookMergeFieldPreview {
 export type BookMergeFileAction = "move" | "stay" | "hide";
 
 export type BookMergeFileReason =
-  "content" | "supplement" | "cover" | "already_in_destination" | "cover_kept_in_place" | "metadata_kept_in_place" | "metadata_hidden" | "missing";
+  | "content"
+  | "supplement"
+  | "cover"
+  | "already_in_destination"
+  | "cover_kept_in_place"
+  | "metadata_kept_in_place"
+  | "metadata_hidden"
+  | "missing"
+  | "read_only_duplicate";
 
 export interface BookMergeFilePlanEntry {
   fileId: number;
@@ -308,6 +318,8 @@ export interface BookMergePreviewResponse {
   visibility: BookMergeVisibility;
   /** True when identical copies exist and the viewer may delete books. */
   canRemoveIdenticalCopies: boolean;
+  /** True when exact duplicate files stay on a read-only library instead of moving. */
+  logicalMerge?: boolean;
   /** The library the merged book lives in afterwards. Absent from older servers. */
   destinationLibraryId?: number | null;
   /** Per destination candidate: how many other readers would lose access with it. Null counts are not the viewer's to see. Absent from older servers. */

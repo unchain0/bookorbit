@@ -10054,6 +10054,7 @@
         "hidden": "Hidden in the old folder",
         "identical": "Identical copy",
         "missing": "Missing on disk",
+        "readOnlyDuplicate": "Kept on disk and ignored while unchanged",
         "inPlace": "Already in place",
         "crossDevice": "{size} is copied to another drive, checked, then removed from the old one.",
         "showMore": "{count, plural, one {Show # more file} other {Show # more files}}",
@@ -10145,6 +10146,10 @@
         "IDENTICAL_COPIES": {
           "message": "Some files are byte for byte copies of files the kept book already has.",
           "detailed": "{count, plural, one {# file is a byte for byte copy of a file the kept book already has.} other {# files are byte for byte copies of files the kept book already has.}}"
+        },
+        "READ_ONLY_DUPLICATES_RETAINED": {
+          "message": "Identical files remain on the read-only library and the scanner ignores them until their contents change.",
+          "detailed": "{count, plural, one {# identical file remains on the read-only library and the scanner ignores it until its contents change.} other {# identical files remain on the read-only library and the scanner ignores them until their contents change.}}"
         },
         "RENAMED_ON_COLLISION": {
           "message": "Some files are renamed because their name is already taken in the destination folder.",

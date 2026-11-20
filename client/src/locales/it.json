@@ -9029,6 +9029,7 @@
         "hidden": "Nascosto nella vecchia cartella",
         "identical": "Copia identica",
         "missing": "Mancante sul disco",
+        "readOnlyDuplicate": "Conservato sul disco e ignorato finché non cambia",
         "inPlace": "Già in posizione",
         "crossDevice": "{size} copiato su un altro disco, verificato e rimosso dal precedente.",
         "showMore": "{count, plural, one {Mostra # altro file} other {Mostra altri # file}}",
@@ -9120,6 +9121,10 @@
         "IDENTICAL_COPIES": {
           "message": "Alcuni file sono copie identiche, byte per byte, dei file già presenti nel libro conservato.",
           "detailed": "{count, plural, one {# file è una copia identica, byte per byte, del file già presente nel libro conservato.} other {# file sono copie identiche, byte per byte, dei file già presenti nel libro conservato.}}"
+        },
+        "READ_ONLY_DUPLICATES_RETAINED": {
+          "message": "I file identici restano nella libreria in sola lettura e lo scanner li ignora finché il contenuto non cambia.",
+          "detailed": "{count, plural, one {# file identico resta nella libreria in sola lettura e lo scanner lo ignora finché il contenuto non cambia.} other {# file identici restano nella libreria in sola lettura e lo scanner li ignora finché il contenuto non cambia.}}"
         },
         "RENAMED_ON_COLLISION": {
           "message": "Alcuni file vengono rinominati perché il loro nome è già in uso nella cartella di destinazione.",

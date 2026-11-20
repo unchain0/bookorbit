@@ -9030,6 +9030,7 @@
         "hidden": "Oculto na pasta antiga",
         "identical": "Cópia idêntica",
         "missing": "Faltando no disco",
+        "readOnlyDuplicate": "Mantido no disco e ignorado enquanto não mudar",
         "inPlace": "Já está no lugar",
         "crossDevice": "{size} foi copiado para outra unidade marcada, depois removida da antiga.",
         "showMore": "{count, plural, one {Mostre mais # arquivo} other {Mostre mais # arquivos}}",
@@ -9121,6 +9122,10 @@
         "IDENTICAL_COPIES": {
           "message": "Alguns arquivos são cópias byte a byte de arquivos que o livro mantido já tem.",
           "detailed": "{count, plural, one {# arquivo é uma cópia byte a byte de um arquivo que o livro preservado já possui.} other {# arquivos são uma cópia byte a byte de um arquivo que o livro preservado já possui.}}"
+        },
+        "READ_ONLY_DUPLICATES_RETAINED": {
+          "message": "Os arquivos idênticos permanecem na biblioteca somente leitura, e o scanner os ignora até o conteúdo mudar.",
+          "detailed": "{count, plural, one {# arquivo idêntico permanece na biblioteca somente leitura, e o scanner o ignora até o conteúdo mudar.} other {# arquivos idênticos permanecem na biblioteca somente leitura, e o scanner os ignora até o conteúdo mudar.}}"
         },
         "RENAMED_ON_COLLISION": {
           "message": "Alguns arquivos são renomeados porque o nome deles já está sendo usado na pasta de destino.",

@@ -27,13 +27,16 @@ const destinationOpen = ref(false)
 const brokenCovers = ref(new Set<number>())
 
 const keeper = computed(() => props.preview.books.find((book) => book.id === props.keeperId) ?? null)
+const logicalMerge = computed(() => props.preview.logicalMerge === true)
 const destinationBook = computed(() => props.preview.books.find((book) => book.id === props.preview.destinationBookId) ?? null)
 const destinationChoices = computed(() => props.preview.books.filter((book) => props.preview.destinationCandidates.includes(book.id)))
 /** A root-level kept book cannot hold the files, so where they go has to be shown and choosable (A9). */
 const keeperRootLevel = computed(() => keeper.value !== null && !keeper.value.canBeDestination)
 /** A10: every book is a root-level file, so the server wraps the kept book into a new folder. */
 const newFolderRelPath = computed(() => props.preview.newFolderRelPath ?? null)
-const showDestinationChooser = computed(() => destinationChoices.value.length > 1 && (keeperRootLevel.value || destinationOpen.value))
+const showDestinationChooser = computed(
+  () => !logicalMerge.value && destinationChoices.value.length > 1 && (keeperRootLevel.value || destinationOpen.value),
+)
 
 /**
  * Across libraries the destination decides which library holds the merged book, so it is always
@@ -192,7 +195,11 @@ function markCoverBroken(bookId: number): void {
       </label>
     </fieldset>
 
-    <section v-if="libraryDestination && libraryCards.length > 0" class="rounded-lg border border-border p-3" data-testid="merge-library-destination">
+    <section
+      v-if="!logicalMerge && libraryDestination && libraryCards.length > 0"
+      class="rounded-lg border border-border p-3"
+      data-testid="merge-library-destination"
+    >
       <component :is="singleLibraryCard ? 'div' : 'fieldset'" class="space-y-2">
         <component :is="singleLibraryCard ? 'h4' : 'legend'" class="text-sm font-semibold text-foreground">
           {{ t('book.merge.crossLibrary.destination.legend') }}
@@ -239,7 +246,7 @@ function markCoverBroken(bookId: number): void {
       </component>
     </section>
 
-    <section v-else-if="destinationBook || keeperRootLevel" class="space-y-2 rounded-lg border border-border p-3">
+    <section v-else-if="!logicalMerge && (destinationBook || keeperRootLevel)" class="space-y-2 rounded-lg border border-border p-3">
       <h4 class="text-sm font-semibold text-foreground">{{ t('book.merge.keeper.destination.heading') }}</h4>
       <template v-if="newFolderRelPath">
         <p class="text-sm text-foreground" data-testid="merge-destination-new-folder">{{ t('book.merge.keeper.destination.newFolder') }}</p>

@@ -19,8 +19,11 @@ import { ConflictException, Logger, NotFoundException } from '@nestjs/common';
 import { NotificationType } from '@bookorbit/types';
 import type { MockedFunction } from 'vitest';
 import type { Dirent } from 'fs';
-import { readdir, stat } from 'fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'fs/promises';
+import { tmpdir } from 'os';
+import { dirname, join } from 'path';
 
+import { computeContentHash } from '../../common/utils/file-move.utils';
 import { LibraryOperationGate } from '../../common/services/library-operation-gate.service';
 import { SelfWriteRegistry } from '../../common/services/self-write-registry.service';
 import { ACHIEVEMENT_EVENT_LIBRARY_CATALOG_CHANGED } from '../achievement/achievement-events.service';
@@ -100,6 +103,8 @@ function makeRepo(overrides: Record<string, unknown> = {}) {
     failScanJob: vi.fn().mockResolvedValue(undefined),
     findBooksByLibraryFolder: vi.fn().mockResolvedValue([]),
     findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([]),
+    findFileTombstones: vi.fn().mockResolvedValue([]),
+    deleteFileTombstones: vi.fn().mockResolvedValue(undefined),
     createBook: vi.fn().mockResolvedValue({ id: 1, status: 'present', libraryFolderId: 1, folderPath: '/library/Author/Book', libraryId: 1 }),
     promoteProcessingBookToPresent: vi.fn().mockResolvedValue(true),
     updateBookStatus: vi.fn().mockResolvedValue(undefined),
@@ -4060,6 +4065,56 @@ describe('targeted book scan', () => {
 
     expect(repo.createBook).toHaveBeenCalledWith(expect.objectContaining({ folderPath: '/library/Author/Book', libraryId: 1 }));
     expect(mockMetadata.extractAndSave).toHaveBeenCalledWith(expect.any(Number), fileStat.absolutePath, 'epub');
+  });
+
+  it('does not reimport an unchanged file recorded by a logical merge', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'bookorbit-tombstone-'));
+    const filePath = join(root, 'Author', 'Copy', 'book.pdf');
+    await mkdir(dirname(filePath), { recursive: true });
+    await writeFile(filePath, 'identical merged content');
+    const sha256 = await computeContentHash(filePath);
+    const fileStat = makeFileStat({ absolutePath: filePath, relPath: 'Author/Copy/book.pdf' });
+    mockBuildSingleCandidate.mockResolvedValue(makeCandidate(dirname(filePath), [fileStat]));
+    const repo = makeRepo({
+      findLibraryFolders: vi.fn().mockResolvedValue([{ id: 1, path: root, libraryId: 1 }]),
+      findFileTombstones: vi.fn().mockResolvedValue([{ id: 77, libraryFolderId: 1, absolutePath: filePath, sha256 }]),
+    });
+    const { service } = makeService(repo);
+
+    try {
+      await (service as any).scanBookFolder(filePath, 1);
+
+      expect(repo.createBook).not.toHaveBeenCalled();
+      expect(repo.createBookFile).not.toHaveBeenCalled();
+      expect(repo.findFileTombstones).toHaveBeenCalledWith(1, [filePath]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('clears a stale tombstone and imports the file after its bytes change', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'bookorbit-tombstone-'));
+    const filePath = join(root, 'Author', 'Copy', 'book.pdf');
+    await mkdir(dirname(filePath), { recursive: true });
+    await writeFile(filePath, 'changed merged content');
+    const actualSha256 = await computeContentHash(filePath);
+    const staleSha256 = actualSha256 === 'a'.repeat(64) ? 'b'.repeat(64) : 'a'.repeat(64);
+    const fileStat = makeFileStat({ absolutePath: filePath, relPath: 'Author/Copy/book.pdf' });
+    mockBuildSingleCandidate.mockResolvedValue(makeCandidate(dirname(filePath), [fileStat]));
+    const repo = makeRepo({
+      findLibraryFolders: vi.fn().mockResolvedValue([{ id: 1, path: root, libraryId: 1 }]),
+      findFileTombstones: vi.fn().mockResolvedValue([{ id: 77, libraryFolderId: 1, absolutePath: filePath, sha256: staleSha256 }]),
+    });
+    const { service } = makeService(repo);
+
+    try {
+      await (service as any).scanBookFolder(filePath, 1);
+
+      expect(repo.deleteFileTombstones).toHaveBeenCalledWith([77]);
+      expect(repo.createBook).toHaveBeenCalled();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('uses buildSingleBookCandidate (not findBookCandidates) for targeted scans', async () => {

@@ -41,6 +41,7 @@ type MoveBookToLibraryResult = Pick<typeof books.$inferSelect, 'id' | 'libraryId
 };
 
 const CLAIM_LOOKUP_BATCH_SIZE = 1000;
+const TOMBSTONE_LOOKUP_BATCH_SIZE = 500;
 
 /** When a finished scan ended, never null, so no row drops out of a keyset comparison. */
 const SCAN_FINISH = sql`coalesce(${scanJobs.completedAt}, ${scanJobs.startedAt})`;
@@ -503,6 +504,32 @@ export class ScannerRepository {
       })
       .from(bookFiles)
       .where(eq(bookFiles.libraryFolderId, libraryFolderId));
+  }
+
+  async findFileTombstones(libraryFolderId: number, absolutePaths: string[]) {
+    const paths = [...new Set(absolutePaths)];
+    const found: Array<{ id: number; absolutePath: string; sha256: string }> = [];
+    for (let offset = 0; offset < paths.length; offset += TOMBSTONE_LOOKUP_BATCH_SIZE) {
+      const rows = await this.db
+        .select({ id: schema.bookFileTombstones.id, absolutePath: schema.bookFileTombstones.absolutePath, sha256: schema.bookFileTombstones.sha256 })
+        .from(schema.bookFileTombstones)
+        .where(
+          and(
+            eq(schema.bookFileTombstones.libraryFolderId, libraryFolderId),
+            inArray(schema.bookFileTombstones.absolutePath, paths.slice(offset, offset + TOMBSTONE_LOOKUP_BATCH_SIZE)),
+          ),
+        );
+      found.push(...rows);
+    }
+    return found;
+  }
+
+  async deleteFileTombstones(ids: number[]): Promise<void> {
+    for (let offset = 0; offset < ids.length; offset += TOMBSTONE_LOOKUP_BATCH_SIZE) {
+      await this.db
+        .delete(schema.bookFileTombstones)
+        .where(inArray(schema.bookFileTombstones.id, ids.slice(offset, offset + TOMBSTONE_LOOKUP_BATCH_SIZE)));
+    }
   }
 
   async findBookFileByHash(fileHash: string, libraryFolderId: number) {

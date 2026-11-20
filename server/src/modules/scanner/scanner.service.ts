@@ -4,9 +4,9 @@ import { ConflictException, Injectable, Logger, NotFoundException, OnApplication
 import { createHash } from 'crypto';
 import { mapWithConcurrency, pipelineWithConcurrency } from '../../common/utils/batch.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { computeContentHash, isInsideRoot } from '../../common/utils/file-move.utils';
 import { audioBookPercentageAt, compareBookFilePaths, remapAudioBookPosition, type AudioTrackSpan } from '../../common/utils/audio-track-order.utils';
 import { compareAudioTracks } from '../../common/utils/book-media.utils';
-import { isInsideRoot } from '../../common/utils/file-move.utils';
 import { pathsReferToSameEntry } from '../../common/utils/path-identity.utils';
 import { selectPrimaryFileKeepingCurrent } from '../../common/utils/primary-file-selection.utils';
 import { SelfWriteRegistry } from '../../common/services/self-write-registry.service';
@@ -1305,6 +1305,13 @@ export class ScannerService implements OnApplicationBootstrap {
         }))
         .filter((candidate) => candidate.files.some((file) => (file.role ?? classifyFile(file.absolutePath).role) === 'content'));
     }
+    candidates = await this.withoutTombstonedCandidates(libraryFolder.id, candidates);
+    if (candidates.length === 0) {
+      this.logger.log(
+        `[${event}] [end] libraryId=${libraryId} path="${sanitizeLogValue(dirPath)}" durationMs=${Date.now() - startedAt} candidateCount=0 skippedLogicalMerge=true - targeted directory scan completed`,
+      );
+      return;
+    }
 
     const heldBack = await this.claimBooksFromOuterFolders(
       libraryId,
@@ -1479,6 +1486,37 @@ export class ScannerService implements OnApplicationBootstrap {
     );
   }
 
+  /** Skip files a logical merge intentionally left in a read-only library until their bytes change. */
+  private async withoutTombstonedCandidates(libraryFolderId: number, candidates: BookCandidate[]): Promise<BookCandidate[]> {
+    const contentPaths = candidates.flatMap((candidate) =>
+      candidate.files.filter((file) => (file.role ?? classifyFile(file.absolutePath).role) === 'content').map((file) => file.absolutePath),
+    );
+    const tombstones = await this.scannerRepo.findFileTombstones(libraryFolderId, [...new Set(contentPaths)]);
+    if (tombstones.length === 0) return candidates;
+
+    const byPath = new Map<string, Array<(typeof tombstones)[number]>>();
+    for (const tombstone of tombstones) {
+      byPath.set(tombstone.absolutePath, [...(byPath.get(tombstone.absolutePath) ?? []), tombstone]);
+    }
+    const staleIds = new Set<number>();
+    const ignored = new Set<string>();
+    for (const path of byPath.keys()) {
+      const pathTombstones = byPath.get(path) ?? [];
+      try {
+        const sha256 = await computeContentHash(path);
+        if (pathTombstones.some((tombstone) => tombstone.sha256 === sha256)) ignored.add(path);
+        else for (const tombstone of pathTombstones) staleIds.add(tombstone.id);
+      } catch {
+        ignored.add(path);
+      }
+    }
+    await this.scannerRepo.deleteFileTombstones([...staleIds]);
+    return candidates.flatMap((candidate) => {
+      const files = candidate.files.filter((file) => !ignored.has(file.absolutePath));
+      return files.some((file) => (file.role ?? classifyFile(file.absolutePath).role) === 'content') ? [{ ...candidate, files }] : [];
+    });
+  }
+
   private emitTargetedScanResult(libraryId: number, result: { becameVisible: boolean; added: number; bookId: number }): void {
     if (result.becameVisible) {
       this.bufferBookForEmit(libraryId, result.bookId);
@@ -1538,6 +1576,12 @@ export class ScannerService implements OnApplicationBootstrap {
       ],
     };
 
+    if ((await this.withoutTombstonedCandidates(libraryFolder.id, [candidate])).length === 0) {
+      this.logger.log(
+        `[${event}] [end] libraryId=${libraryId} path="${sanitizeLogValue(filePath)}" durationMs=${Date.now() - startedAt} skippedLogicalMerge=true scanScope=file - targeted book scan completed`,
+      );
+      return;
+    }
     if ((await this.claimBooksFromOuterFolders(libraryId, libraryFolder, roots, [candidate.folderPath])).size > 0) {
       this.logger.log(
         `[${event}] [end] libraryId=${libraryId} path="${sanitizeLogValue(filePath)}" durationMs=${Date.now() - startedAt} heldBackForBusyLibrary=true - targeted book scan completed`,
@@ -1618,6 +1662,12 @@ export class ScannerService implements OnApplicationBootstrap {
       ],
     };
 
+    if ((await this.withoutTombstonedCandidates(libraryFolder.id, [candidate])).length === 0) {
+      this.logger.log(
+        `[${event}] [end] libraryId=${libraryId} path="${sanitizeLogValue(filePath)}" durationMs=${Date.now() - startedAt} skippedLogicalMerge=true scanScope=file - targeted book scan completed`,
+      );
+      return;
+    }
     if ((await this.claimBooksFromOuterFolders(libraryId, libraryFolder, roots, [candidate.folderPath])).size > 0) {
       this.logger.log(
         `[${event}] [end] libraryId=${libraryId} path="${sanitizeLogValue(filePath)}" durationMs=${Date.now() - startedAt} heldBackForBusyLibrary=true - targeted book scan completed`,
@@ -1717,6 +1767,13 @@ export class ScannerService implements OnApplicationBootstrap {
       candidate = { ...candidate, files: filtered };
     }
 
+    candidate = (await this.withoutTombstonedCandidates(libraryFolder.id, [candidate]))[0] ?? null;
+    if (candidate === null) {
+      this.logger.log(
+        `[${event}] [end] libraryId=${libraryId} path="${sanitizeLogValue(filePath)}" durationMs=${Date.now() - startedAt} skippedLogicalMerge=true scanScope=folder - targeted book scan completed`,
+      );
+      return;
+    }
     if ((await this.claimBooksFromOuterFolders(libraryId, libraryFolder, roots, [candidate.folderPath])).size > 0) {
       this.logger.log(
         `[${event}] [end] libraryId=${libraryId} path="${sanitizeLogValue(filePath)}" durationMs=${Date.now() - startedAt} heldBackForBusyLibrary=true - targeted book scan completed`,
@@ -1840,6 +1897,7 @@ export class ScannerService implements OnApplicationBootstrap {
             }))
             .filter((c) => c.files.some((f) => (f.role ?? classifyFile(f.absolutePath).role) === 'content'));
         }
+        candidates = await this.withoutTombstonedCandidates(folder.id, candidates);
 
         const heldBack = await this.claimBooksFromOuterFolders(
           libraryId,

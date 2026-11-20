@@ -11,7 +11,7 @@ import { dirname, join, relative } from 'path';
 
 import { FileLockService } from '../../common/services/file-lock.service';
 import { SelfWriteRegistry } from '../../common/services/self-write-registry.service';
-import { moveFileBack } from '../../common/utils/file-move.utils';
+import { computeContentHash, moveFileBack } from '../../common/utils/file-move.utils';
 import type { BookMergeJobMove } from '../../db/schema';
 import type { BookConsolidationService, ConsolidateResult } from '../book-consolidation/book-consolidation.service';
 import type { BookCoverStore } from '../book-cover-store/book-cover-store.service';
@@ -176,6 +176,86 @@ describe('BookMergeExecutor.run', () => {
 
     expect(onProgress).toHaveBeenNthCalledWith(1, expect.objectContaining({ status: 'moving', bytesDone: 0, bytesTotal: 10 }));
     expect(onProgress).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'committed', bytesDone: 10, bytesTotal: 10 }));
+  });
+
+  it('commits a logical merge without moving files', async () => {
+    const sourcePath = join(libraryRoot, 'Frank Herbert', 'Dune Copy', 'Dune.epub');
+    const survivorPath = join(targetFolder, 'Dune.epub');
+    await writeBook(sourcePath, 'same bytes');
+    await writeBook(survivorPath, 'same bytes');
+    const sha256 = await computeContentHash(sourcePath);
+    const plan = {
+      ...planOf([stepOf(2, [])]),
+      logicalMerge: true,
+      logicalFileTombstones: [
+        {
+          sourceBookId: 2,
+          fileId: 20,
+          survivorFileId: 10,
+          libraryFolderId: 11,
+          absolutePath: sourcePath,
+          survivorPath,
+          sha256,
+        },
+      ],
+    };
+    const { executor, consolidation, repository, tx } = createExecutor();
+
+    const result = await executor.run(jobOf(plan), plan, vi.fn());
+
+    expect(consolidation.consolidate).toHaveBeenCalledWith(
+      tx,
+      expect.objectContaining({
+        sourceBookId: 2,
+        targetFileUpdates: [],
+        sourceFileUpdates: [],
+        logicalFileTombstones: [
+          {
+            loserFileId: 20,
+            survivorFileId: 10,
+            libraryFolderId: 11,
+            absolutePath: join(libraryRoot, 'Frank Herbert', 'Dune Copy', 'Dune.epub'),
+            sha256,
+          },
+        ],
+      }),
+    );
+    expect(repository.setMoves).not.toHaveBeenCalled();
+    expect(existsSync(sourcePath)).toBe(true);
+    expect(existsSync(survivorPath)).toBe(true);
+    expect(result.movedFileCount).toBe(0);
+  });
+
+  it('refuses a logical merge if a duplicate changes after the preview', async () => {
+    const sourcePath = join(libraryRoot, 'Frank Herbert', 'Dune Copy', 'Dune.epub');
+    const survivorPath = join(targetFolder, 'Dune.epub');
+    await writeBook(sourcePath, 'before');
+    await writeBook(survivorPath, 'before');
+    const sha256 = await computeContentHash(sourcePath);
+    await writeFile(sourcePath, 'after!');
+    const plan = {
+      ...planOf([stepOf(2, [])]),
+      logicalMerge: true,
+      logicalFileTombstones: [
+        {
+          sourceBookId: 2,
+          fileId: 20,
+          survivorFileId: 10,
+          libraryFolderId: 11,
+          absolutePath: sourcePath,
+          survivorPath,
+          sha256,
+        },
+      ],
+    };
+    const { executor, consolidation } = createExecutor();
+
+    const result = await executor.run(jobOf(plan), plan, vi.fn());
+
+    expect(result.errorCode).toBe('FILE_CHANGED');
+    expect(consolidation.consolidate).not.toHaveBeenCalled();
+    expect(existsSync(sourcePath)).toBe(true);
+    expect(existsSync(survivorPath)).toBe(true);
   });
 
   it('keeps the watchers of both libraries quiet while a book moves in from another library (X31)', async () => {

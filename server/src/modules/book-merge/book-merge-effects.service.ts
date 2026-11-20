@@ -86,9 +86,15 @@ export class BookMergeEffectsService {
       );
     }
 
-    const retired = plan.deleteIdenticalCopies ? await this.retireIdenticalCopies(job.id, plan) : 0;
+    const retired = plan.logicalMerge
+      ? (plan.logicalFileTombstones ?? []).length
+      : plan.deleteIdenticalCopies
+        ? await this.retireIdenticalCopies(job.id, plan)
+        : 0;
 
-    await this.attempt(job.id, 'rescan', () => Promise.resolve(this.scanner.scanBookDirectoryAsync(plan.destination.folderPath, plan.libraryId)));
+    if (!plan.logicalMerge) {
+      await this.attempt(job.id, 'rescan', () => Promise.resolve(this.scanner.scanBookDirectoryAsync(plan.destination.folderPath, plan.libraryId)));
+    }
     await this.attempt(job.id, 'metadata_score', () => this.metadataScore.calculateAndSaveMany([targetBookId]));
     await this.attempt(job.id, 'story_edits', () => this.storyEdits.resyncBook(targetBookId));
     void this.embedder.embedBook(targetBookId).catch(() => undefined);

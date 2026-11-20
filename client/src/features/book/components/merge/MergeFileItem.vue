@@ -17,6 +17,7 @@ const moves = computed(() => props.file.action === 'move' && props.file.toRelPat
 const placement = computed(() => {
   const file = props.file
   if (file.reason === 'missing') return t('book.merge.files.missing')
+  if (file.reason === 'read_only_duplicate') return t('book.merge.files.readOnlyDuplicate')
   // The destination's own files also "stay", but they are where every other file is going.
   if (file.reason === 'already_in_destination') return t('book.merge.files.inPlace')
   if (file.action === 'hide') return t('book.merge.files.hidden')

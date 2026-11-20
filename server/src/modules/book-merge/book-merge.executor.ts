@@ -7,13 +7,21 @@ import type { BookMergeField, BookMergeSourceOutcome } from '@bookorbit/types';
 import { FileLockService, bookOperationLockKey } from '../../common/services/file-lock.service';
 import { SelfWriteRegistry } from '../../common/services/self-write-registry.service';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
-import { buildSuppressionPaths, isInsideRoot, moveFile, moveFileBack, pathExists, removeEmptyDirs } from '../../common/utils/file-move.utils';
+import {
+  buildSuppressionPaths,
+  computeContentHash,
+  isInsideRoot,
+  moveFile,
+  moveFileBack,
+  pathExists,
+  removeEmptyDirs,
+} from '../../common/utils/file-move.utils';
 import type { BookMergeJobMove } from '../../db/schema';
 import { BookConsolidationService, type ConsolidateResult, type FileRowUpdate } from '../book-consolidation/book-consolidation.service';
 import { BookCoverStore } from '../book-cover-store/book-cover-store.service';
 import type { BookCoverSlotRow } from '../book-cover-store/book-cover-store.repository';
 import { FileRenameService } from '../file-write/file-rename.service';
-import type { MergeExecutionPlan, MergeStep } from './book-merge.planner';
+import type { LogicalFileTombstone, MergeExecutionPlan, MergeStep } from './book-merge.planner';
 import { BookMergeRepository, type MergeJobRow } from './book-merge.repository';
 
 const MERGE_EVENT = 'book_merge';
@@ -152,8 +160,9 @@ export class BookMergeExecutor {
     for (const [index, step] of plan.steps.entries()) {
       const outcome = outcomes[index];
       const journal: BookMergeJobMove[] = [];
-      await this.repository.updateJob(job.id, { status: 'moving', currentSourceBookId: step.sourceBookId, moves: [], outcomes });
-      onProgress({ status: 'moving', currentSourceBookId: step.sourceBookId, processed, outcomes, bytesDone, bytesTotal });
+      const stepStatus = plan.logicalMerge ? 'committing' : 'moving';
+      await this.repository.updateJob(job.id, { status: stepStatus, currentSourceBookId: step.sourceBookId, moves: [], outcomes });
+      onProgress({ status: stepStatus, currentSourceBookId: step.sourceBookId, processed, outcomes, bytesDone, bytesTotal });
       const onBytes = (copied: number): void => {
         const now = Date.now();
         if (now - lastBytesAt < BYTE_PROGRESS_INTERVAL_MS) return;
@@ -162,6 +171,7 @@ export class BookMergeExecutor {
       };
 
       try {
+        if (plan.logicalMerge) await this.validateLogicalCopies(plan, step.sourceBookId);
         const slots = await this.coverStore.slotsForAdoption(step.sourceBookId);
         storedSlots[String(step.sourceBookId)] = slots.map((slot) => ({
           ...slot,
@@ -185,6 +195,15 @@ export class BookMergeExecutor {
             targetFileUpdates: this.fileUpdates(step, plan, stats, true),
             sourceFileUpdates: this.fileUpdates(step, plan, stats, false),
             droppedSidecarFileIds: step.droppedSidecarFileIds,
+            logicalFileTombstones: (plan.logicalFileTombstones ?? [])
+              .filter((tombstone) => tombstone.sourceBookId === step.sourceBookId)
+              .map((tombstone) => ({
+                loserFileId: tombstone.fileId,
+                survivorFileId: tombstone.survivorFileId,
+                libraryFolderId: tombstone.libraryFolderId,
+                absolutePath: tombstone.absolutePath,
+                sha256: tombstone.sha256,
+              })),
             fieldSources: new Map(Object.entries(plan.fieldSources) as Array<[BookMergeField, number]>),
             excludeTagIds: plan.excludeTagIds,
             excludeGenreIds: plan.excludeGenreIds,
@@ -238,6 +257,28 @@ export class BookMergeExecutor {
       }
     }
     return { outcomes, merged, movedFileCount, crossDevice, rolledBack: false, failed: false, errorCode: null };
+  }
+
+  private async validateLogicalCopies(plan: MergeExecutionPlan, sourceBookId: number): Promise<void> {
+    const tombstones = (plan.logicalFileTombstones ?? []).filter((file) => file.sourceBookId === sourceBookId);
+    if (tombstones.length === 0) throw new BookMergeStepError('MERGE_PLAN_INVALID', 'A logical merge has no verified duplicate files.');
+    for (const tombstone of tombstones) await this.validateLogicalCopy(tombstone);
+  }
+
+  private async validateLogicalCopy(tombstone: LogicalFileTombstone): Promise<void> {
+    const [source, survivor] = await Promise.all([stat(tombstone.absolutePath).catch(() => null), stat(tombstone.survivorPath).catch(() => null)]);
+    if (!source?.isFile() || !survivor?.isFile() || source.size !== survivor.size) {
+      throw new BookMergeStepError('FILE_CHANGED', 'An identical file changed after the preview. Review the merge again.');
+    }
+    try {
+      const [sourceHash, survivorHash] = await Promise.all([computeContentHash(tombstone.absolutePath), computeContentHash(tombstone.survivorPath)]);
+      if (sourceHash !== tombstone.sha256 || survivorHash !== tombstone.sha256) {
+        throw new BookMergeStepError('FILE_CHANGED', 'An identical file changed after the preview. Review the merge again.');
+      }
+    } catch (error) {
+      if (error instanceof BookMergeStepError) throw error;
+      throw new BookMergeStepError('FILE_CHANGED', 'An identical file could not be verified. Review the merge again.');
+    }
   }
 
   private async moveFiles(

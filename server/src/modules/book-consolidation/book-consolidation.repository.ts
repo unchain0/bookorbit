@@ -783,6 +783,18 @@ export class BookConsolidationRepository {
       .onConflictDoUpdate({ target: schema.bookMerges.sourceBookId, set: { targetBookId: input.targetBookId } });
   }
 
+  async recordFileTombstones(
+    tx: ConsolidationTx,
+    sourceBookId: number,
+    tombstones: Array<{ libraryFolderId: number; absolutePath: string; sha256: string }>,
+  ): Promise<void> {
+    if (tombstones.length === 0) return;
+    await tx
+      .insert(schema.bookFileTombstones)
+      .values(tombstones.map((tombstone) => ({ ...tombstone, sourceBookId })))
+      .onConflictDoNothing();
+  }
+
   async deleteBook(tx: ConsolidationTx, bookId: number): Promise<void> {
     await deleteBooksWithHashInvalidation(tx, eq(schema.books.id, bookId));
   }

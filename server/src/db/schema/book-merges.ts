@@ -1,9 +1,9 @@
 import { sql } from 'drizzle-orm';
-import { check, index, integer, jsonb, pgTable, serial, text, timestamp, varchar } from 'drizzle-orm/pg-core';
+import { check, index, integer, jsonb, pgTable, serial, text, timestamp, uniqueIndex, varchar } from 'drizzle-orm/pg-core';
 
 import { users } from './auth';
 import { books } from './books';
-import { libraries } from './libraries';
+import { libraries, libraryFolders } from './libraries';
 
 export interface BookMergeSnapshotFile {
   fileId: number;
@@ -114,4 +114,26 @@ export const bookMerges = pgTable(
     snapshot: jsonb('snapshot').$type<BookMergeSnapshot>().notNull(),
   },
   (t) => [index('book_merges_target_book_id_idx').on(t.targetBookId)],
+);
+
+/** Exact duplicate files left on a read-only library after their source book is merged. */
+export const bookFileTombstones = pgTable(
+  'book_file_tombstones',
+  {
+    id: serial('id').primaryKey(),
+    libraryFolderId: integer('library_folder_id')
+      .notNull()
+      .references(() => libraryFolders.id, { onDelete: 'cascade' }),
+    sourceBookId: integer('source_book_id')
+      .notNull()
+      .references(() => bookMerges.sourceBookId, { onDelete: 'cascade' }),
+    absolutePath: text('absolute_path').notNull(),
+    sha256: varchar('sha256', { length: 64 }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex('book_file_tombstones_path_hash_uq').on(t.libraryFolderId, t.absolutePath, t.sha256),
+    index('book_file_tombstones_source_idx').on(t.sourceBookId),
+    check('book_file_tombstones_sha256_chk', sql`${t.sha256} ~ '^[0-9a-f]{64}$'`),
+  ],
 );

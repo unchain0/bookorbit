@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { ref } from 'vue'
 import type { BookCard, BookMergeJobEvent, BookMergeRequest, BookMergePreviewRequest, Library } from '@bookorbit/types'
+import { i18n } from '@/i18n'
 import MergeBooksSheet from '../MergeBooksSheet.vue'
 import { jsonResponse, mergeBook, mergeField, mergeJob, mergePreview } from './fixtures'
 
@@ -163,6 +164,24 @@ describe('MergeBooksSheet keeper step', () => {
     const destinations = wrapper!.findAll('fieldset').at(-1)!.findAll<HTMLInputElement>('input[type="radio"]')
     expect(destinations.map((radio) => radio.element.checked)).toEqual([true, false])
   })
+  it('does not offer a filesystem destination for a logical read-only merge', async () => {
+    respond(PREVIEW_URL, () =>
+      jsonResponse(
+        mergePreview({
+          logicalMerge: true,
+          books: [mergeBook(1, { folderRelPath: null, canBeDestination: false }), mergeBook(2)],
+          destinationBookId: 1,
+          destinationCandidates: [],
+        }),
+      ),
+    )
+    await mountSheet()
+
+    expect(wrapper!.find('[data-testid="merge-destination-summary"]').exists()).toBe(false)
+    expect(wrapper!.find('[data-testid="merge-destination-new-folder"]').exists()).toBe(false)
+    expect(wrapper!.text()).not.toContain(i18n.global.t('book.merge.keeper.destination.rootLevel'))
+  })
+
   it('names the new folder when every book is a single file at the top of the library', async () => {
     respond(PREVIEW_URL, () =>
       jsonResponse(

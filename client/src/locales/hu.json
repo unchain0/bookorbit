@@ -9027,6 +9027,7 @@
         "hidden": "Elrejtve a régi mappában",
         "identical": "Azonos példány",
         "missing": "Hiányzik a lemezről",
+        "readOnlyDuplicate": "A lemezen marad, és változatlanul figyelmen kívül marad",
         "inPlace": "Már a helyén van",
         "crossDevice": "{size} átmásolódik egy másik meghajtóra, ellenőrzésen esik át, majd törlődik a régiről.",
         "showMore": "{count, plural, one {További # fájl megjelenítése} other {További # fájl megjelenítése}}",
@@ -9118,6 +9119,10 @@
         "IDENTICAL_COPIES": {
           "message": "Néhány fájl bájtra pontosan megegyezik a megtartott könyv már meglévő fájljaival.",
           "detailed": "{count, plural, one {# fájl bájtra pontosan megegyezik a megtartandó könyvben már meglévő egyik fájllal.} other {# fájl bájtra pontosan megegyezik a megtartandó könyvben már meglévő egyik fájllal.}}"
+        },
+        "READ_ONLY_DUPLICATES_RETAINED": {
+          "message": "Az azonos fájlok a csak olvasható könyvtárban maradnak, a kereső pedig figyelmen kívül hagyja őket, amíg a tartalmuk meg nem változik.",
+          "detailed": "{count, plural, one {# azonos fájl a csak olvasható könyvtárban marad, a kereső pedig figyelmen kívül hagyja, amíg a tartalma meg nem változik.} other {# azonos fájl a csak olvasható könyvtárban marad, a kereső pedig figyelmen kívül hagyja, amíg a tartalma meg nem változik.}}"
         },
         "RENAMED_ON_COLLISION": {
           "message": "Néhány fájl át lesz nevezve, mert a neve már foglalt a célmappában.",

@@ -43,6 +43,10 @@ describe('MergeWarnings across libraries', () => {
       { code: 'COMPANION_REQUEST_STAYS', libraryId: 2 },
       'A requested other format of this book will arrive in Audiobooks as a book of its own instead of joining the merged book.',
     ],
+    [
+      { code: 'READ_ONLY_DUPLICATES_RETAINED', count: 2 },
+      '2 identical files remain on the read-only library and the scanner ignores them until their contents change.',
+    ],
   ] as [BookMergeWarning, string][])('says %o in words', (warning, text) => {
     expect(texts([warning])).toEqual([text])
   })

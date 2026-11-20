@@ -4,11 +4,13 @@ vi.mock('fs/promises', async (importOriginal) => {
 });
 
 import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
-import { access, readdir, stat, statfs } from 'fs/promises';
+import { access, mkdir, mkdtemp, readdir, rm, stat, statfs, writeFile } from 'fs/promises';
+import { tmpdir } from 'os';
 import { basename, dirname, extname, join } from 'path';
 
 import { BOOK_MERGE_MAX_BOOKS, Permission } from '@bookorbit/types';
 
+import { computeContentHash } from '../../common/utils/file-move.utils';
 import type { FileLockService } from '../../common/services/file-lock.service';
 import type { LibraryOperationGate } from '../../common/services/library-operation-gate.service';
 import type { RequestUser } from '../../common/types/request-user';
@@ -33,6 +35,7 @@ interface DiskEntry {
 
 const disk = new Map<string, DiskEntry>();
 const readOnly = new Set<string>();
+const readOnlyFs = new Set<string>();
 
 function fsError(code: string, path: string): Error {
   return Object.assign(new Error(`${code}: ${path}`), { code });
@@ -69,6 +72,7 @@ function installDisk(): void {
   }) as never);
   vi.mocked(access).mockImplementation(((path: string) => {
     if (!disk.has(path)) return Promise.reject(fsError('ENOENT', path));
+    if (readOnlyFs.has(path)) return Promise.reject(fsError('EROFS', path));
     if (readOnly.has(path)) return Promise.reject(fsError('EACCES', path));
     return Promise.resolve();
   }) as never);
@@ -228,6 +232,7 @@ const MERGE_2_INTO_1: PlanRequest = { targetBookId: 1, sourceBookIds: [2] };
 beforeEach(() => {
   disk.clear();
   readOnly.clear();
+  readOnlyFs.clear();
   vi.mocked(stat).mockReset();
   vi.mocked(readdir).mockReset();
   vi.mocked(access).mockReset();
@@ -421,6 +426,154 @@ describe('BookMergePlanner.plan', () => {
       const { preview } = await planner.plan(MERGE_2_INTO_1, makeUser());
 
       expect(preview.blockers).toEqual([{ code: 'FOLDER_NOT_WRITABLE', libraryId: 1, relPath: join('Frank Herbert', 'Dune Copy') }]);
+    });
+
+    it('plans a logical merge for identical copies in read-only folders', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'bookorbit-logical-merge-'));
+      const targetFolder = join(root, 'Target');
+      const sourceFolder = join(root, 'Source');
+      const targetPath = join(targetFolder, 'book.pdf');
+      const sourcePath = join(sourceFolder, 'book.pdf');
+      await mkdir(targetFolder, { recursive: true });
+      await mkdir(sourceFolder, { recursive: true });
+      await Promise.all([writeFile(targetPath, 'same bytes'), writeFile(sourcePath, 'same bytes')]);
+      const sha256 = await computeContentHash(sourcePath);
+      const target = bookRow(1, targetFolder, { libraryFolderPath: root });
+      const source = bookRow(2, sourceFolder, { libraryFolderPath: root });
+      const targetFile = fileRow(10, 1, targetPath, { fileHash: 'fingerprint' });
+      const sourceFile = fileRow(20, 2, sourcePath, { fileHash: 'fingerprint' });
+      addFile(targetPath);
+      addFile(sourcePath);
+      readOnlyFs.add(targetFolder);
+      readOnlyFs.add(sourceFolder);
+      const { planner } = createPlanner({ books: [target, source], files: [targetFile, sourceFile] });
+
+      try {
+        const { preview, plan } = await planner.plan(MERGE_2_INTO_1, makeUser());
+
+        expect(preview.blockers).toEqual([]);
+        expect(preview.logicalMerge).toBe(true);
+        expect(plan?.logicalFileTombstones).toEqual([
+          {
+            sourceBookId: 2,
+            fileId: 20,
+            survivorFileId: 10,
+            libraryFolderId: 11,
+            absolutePath: sourcePath,
+            survivorPath: targetPath,
+            sha256,
+          },
+        ]);
+        expect(plan?.steps[0]?.moves).toEqual([]);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('invalidates a logical merge preview when identical paths change bytes without size or mtime changes', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'bookorbit-logical-merge-'));
+      const targetFolder = join(root, 'Target');
+      const sourceFolder = join(root, 'Source');
+      const targetPath = join(targetFolder, 'book.pdf');
+      const sourcePath = join(sourceFolder, 'book.pdf');
+      await mkdir(targetFolder, { recursive: true });
+      await mkdir(sourceFolder, { recursive: true });
+      await Promise.all([writeFile(targetPath, 'same bytes'), writeFile(sourcePath, 'same bytes')]);
+      const target = bookRow(1, targetFolder, { libraryFolderPath: root });
+      const source = bookRow(2, sourceFolder, { libraryFolderPath: root });
+      addFile(targetPath);
+      addFile(sourcePath);
+      readOnlyFs.add(targetFolder);
+      readOnlyFs.add(sourceFolder);
+      const { planner } = createPlanner({
+        books: [target, source],
+        files: [
+          fileRow(10, 1, targetPath, { fileHash: 'same-sampled-fingerprint' }),
+          fileRow(20, 2, sourcePath, { fileHash: 'same-sampled-fingerprint' }),
+        ],
+      });
+
+      try {
+        const first = await planner.plan(MERGE_2_INTO_1, makeUser());
+        await writeFile(sourcePath, 'diff bytes');
+        const second = await planner.plan(MERGE_2_INTO_1, makeUser());
+
+        expect(first.preview.logicalMerge).toBe(true);
+        expect(second.preview.logicalMerge).toBe(false);
+        expect(second.preview.blockers).toContainEqual(expect.objectContaining({ code: 'FOLDER_NOT_WRITABLE' }));
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps read-only folders blocked when a source folder has untracked content', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'bookorbit-logical-merge-'));
+      const targetFolder = join(root, 'Target');
+      const sourceFolder = join(root, 'Source');
+      const targetPath = join(targetFolder, 'book.pdf');
+      const sourcePath = join(sourceFolder, 'book.pdf');
+      await mkdir(targetFolder, { recursive: true });
+      await mkdir(sourceFolder, { recursive: true });
+      await Promise.all([writeFile(targetPath, 'same bytes'), writeFile(sourcePath, 'same bytes')]);
+      const target = bookRow(1, targetFolder, { libraryFolderPath: root });
+      const source = bookRow(2, sourceFolder, { libraryFolderPath: root });
+      addFile(targetPath);
+      addFile(sourcePath);
+      addFile(join(sourceFolder, 'untracked.txt'));
+      readOnlyFs.add(targetFolder);
+      readOnlyFs.add(sourceFolder);
+      const { planner } = createPlanner({
+        books: [target, source],
+        files: [
+          fileRow(10, 1, targetPath, { fileHash: 'same-sampled-fingerprint' }),
+          fileRow(20, 2, sourcePath, { fileHash: 'same-sampled-fingerprint' }),
+        ],
+      });
+
+      try {
+        const { preview, plan } = await planner.plan(MERGE_2_INTO_1, makeUser());
+
+        expect(preview.logicalMerge).toBe(false);
+        expect(preview.warnings).toContainEqual(expect.objectContaining({ code: 'LEFTOVER_FILES' }));
+        expect(preview.blockers).toContainEqual(expect.objectContaining({ code: 'FOLDER_NOT_WRITABLE' }));
+        expect(plan).toBeNull();
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps read-only folders blocked when any source content is not byte-identical', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'bookorbit-logical-merge-'));
+      const targetFolder = join(root, 'Target');
+      const sourceFolder = join(root, 'Source');
+      const targetPath = join(targetFolder, 'book.pdf');
+      const sourcePath = join(sourceFolder, 'book.pdf');
+      await mkdir(targetFolder, { recursive: true });
+      await mkdir(sourceFolder, { recursive: true });
+      await Promise.all([writeFile(targetPath, 'target bytes'), writeFile(sourcePath, 'different source bytes')]);
+      const target = bookRow(1, targetFolder, { libraryFolderPath: root });
+      const source = bookRow(2, sourceFolder, { libraryFolderPath: root });
+      addFile(targetPath);
+      addFile(sourcePath);
+      readOnlyFs.add(targetFolder);
+      readOnlyFs.add(sourceFolder);
+      const { planner } = createPlanner({
+        books: [target, source],
+        files: [
+          fileRow(10, 1, targetPath, { fileHash: 'same-sampled-fingerprint' }),
+          fileRow(20, 2, sourcePath, { fileHash: 'same-sampled-fingerprint' }),
+        ],
+      });
+
+      try {
+        const { preview, plan } = await planner.plan(MERGE_2_INTO_1, makeUser());
+
+        expect(preview.logicalMerge).toBe(false);
+        expect(preview.blockers).toContainEqual(expect.objectContaining({ code: 'FOLDER_NOT_WRITABLE' }));
+        expect(plan).toBeNull();
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
     });
 
     it('reports NESTED_BOOK_CONFLICT when a content file would land beside a folder named like its stem', async () => {
